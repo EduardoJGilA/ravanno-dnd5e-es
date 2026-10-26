@@ -1,0 +1,163 @@
+name: CI
+
+# MGK fork of ravanno-dnd5e-es. `check` validates every JSON file; `release`
+# runs after it on master/tags/manual and publishes a GitHub release. Bump the
+# version in module.json (or let the job raise the patch) and push to master.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the leading v (e.g. 5.3.5). Leave blank to use module.json.'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Catches broken homebrew translation files before they reach players.
+      - name: Validate module.json and translation files
+        run: |
+          node -e '
+            const fs = require("fs");
+            const files = ["module.json", ...["compendium", "lang"].flatMap(d => fs.readdirSync(d).filter(f => f.endsWith(".json")).map(f => `${d}/${f}`))];
+            for (const f of files) {
+              try { JSON.parse(fs.readFileSync(f, "utf8")); } catch (e) { throw new Error(`${f}: ${e.message}`); }
+            }
+            const m = JSON.parse(fs.readFileSync("module.json", "utf8"));
+            for (const file of [...m.esmodules, ...m.styles, ...m.languages.map(l => l.path)]) {
+              if (!fs.existsSync(file)) throw new Error(`module.json references a missing file: ${file}`);
+            }
+            console.log(`${files.length} JSON files are valid`);
+          '
+
+  release:
+    name: Publish release
+    needs: check
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.ref == 'refs/heads/master'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide Whether There Is Anything To Ship
+        id: scope
+        run: |
+          set -euo pipefail
+          BEFORE="${{ github.event.before }}"
+          EMPTY="0000000000000000000000000000000000000000"
+
+          if [ "$GITHUB_EVENT_NAME" != "push" ] || [ -z "$BEFORE" ] || [ "$BEFORE" = "$EMPTY" ]; then
+            echo "ship=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED="$(git diff --name-only "$BEFORE" "$GITHUB_SHA" || echo module.json)"
+          echo "Changed files:"; echo "$CHANGED" | sed 's/^/  /'
+
+          if echo "$CHANGED" | grep -qE '^(module\.json|babele-register\.js|compendium/|lang/|css/|assets/)'; then
+            echo "ship=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ship=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Nothing that ships changed, so no release."
+          fi
+
+      - name: Resolve Version
+        id: guard
+        if: steps.scope.outputs.ship == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          INPUT="${{ github.event.inputs.version }}"
+          BUMPED=false
+
+          if [ -n "$INPUT" ]; then
+            VERSION="$INPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="$(node -p "require('./module.json').version")"
+            while gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; do
+              VERSION="$(node -e "
+                const [major, minor, patch] = process.argv[1].split('.').map(Number);
+                console.log([major, minor, (patch || 0) + 1].join('.'));
+              " "$VERSION")"
+              BUMPED=true
+            done
+          fi
+
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v$VERSION is already released."
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Publishing v$VERSION."
+          fi
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=v$VERSION" >> "$GITHUB_ENV"
+          echo "bumped=$BUMPED" >> "$GITHUB_OUTPUT"
+
+      - name: Update module.json Version & Manifest URLs
+        if: steps.guard.outputs.released == 'false'
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "module.json";
+            const m = JSON.parse(fs.readFileSync(p, "utf8"));
+            const repo = process.env.GITHUB_REPOSITORY;
+            m.version = process.env.VERSION;
+            m.url = `https://github.com/${repo}`;
+            m.manifest = `https://github.com/${repo}/releases/latest/download/module.json`;
+            m.download = `https://github.com/${repo}/releases/download/${process.env.TAG}/module.zip`;
+            fs.writeFileSync(p, JSON.stringify(m, null, 2) + "\n");
+          '
+
+      - name: Commit the Bumped Version Back To master
+        if: steps.guard.outputs.released == 'false' && steps.guard.outputs.bumped == 'true' && github.ref == 'refs/heads/master'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add module.json
+          git commit -m "chore: release v$VERSION [skip ci]"
+          git push origin HEAD:master
+
+      - name: Create Zip Artifact
+        if: steps.guard.outputs.released == 'false'
+        run: zip -qr module.zip module.json README.md LICENSE babele-register.js assets compendium css lang
+
+      - name: Upload Release Assets
+        if: steps.guard.outputs.released == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          generate_release_notes: true
+          files: |
+            module.json
+            module.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

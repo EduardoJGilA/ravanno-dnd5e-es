@@ -1,5 +1,10 @@
 # Translation: Español [DnD5e]
 
+> **Fork MGK** de [ravanno/ravanno-dnd5e-es](https://github.com/ravanno/ravanno-dnd5e-es) v5.3.3 (dnd5e 5.3.x), publicado en GitHub. Requiere el [fork MGK de Babele](https://github.com/EduardoJGilA/foundryvtt-babele).
+> Instalar: `https://github.com/EduardoJGilA/ravanno-dnd5e-es/releases/latest/download/module.json`
+>
+> Traducciones homebrew: un archivo `compendium/<id-del-pack>.json` por compendio (ej. `world.mis-hechizos.json`), con el mismo formato que `compendium/dnd5e.spells.json`.
+
 Traducción al español del sistema de Dungeons & Dragons 5E (SRD).
 
 Actualizando para DnD5e 5.3.0 y Foundry 11.315 (Verificado 14)
